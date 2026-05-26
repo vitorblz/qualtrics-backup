@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { db, insertPesquisaStmt } from './db.js';
+import { loadStore, saveStore, upsertPesquisa } from './store.js';
 import { iterSurveys } from './qualtrics.js';
 
 const token = process.env.QUALTRICS_API_TOKEN;
@@ -10,37 +10,27 @@ if (!token) {
 
 const baseUrl = process.env.QUALTRICS_BASE_URL;
 
+const state = loadStore();
+
 let total = 0;
 let inseridas = 0;
 let paginaAtual = 0;
 
-const insertMany = db.transaction((batch) => {
-  for (const { id, name } of batch) {
-    const info = insertPesquisaStmt.run(id, name ?? '');
-    if (info.changes > 0) inseridas += 1;
-  }
-});
-
 try {
-  let buffer = [];
   for await (const survey of iterSurveys({ token, baseUrl })) {
     total += 1;
-    buffer.push(survey);
+    if (upsertPesquisa(state, { id: survey.id, name: survey.name })) {
+      inseridas += 1;
+    }
     if (survey._page !== paginaAtual) {
       paginaAtual = survey._page;
       console.log(`Pagina ${paginaAtual} recebida (total acumulado: ${total})`);
     }
-    if (buffer.length >= 500) {
-      insertMany(buffer);
-      buffer = [];
-    }
   }
-  if (buffer.length) insertMany(buffer);
-
+  saveStore(state);
   console.log(`Concluido. Pesquisas vistas: ${total}. Novas inseridas: ${inseridas}.`);
 } catch (err) {
+  saveStore(state);
   console.error('Falha ao buscar pesquisas:', err.message);
   process.exitCode = 1;
-} finally {
-  db.close();
 }

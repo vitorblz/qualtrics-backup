@@ -6,8 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Install deps: `pnpm install`
 - Run survey fetch: `pnpm busca-pesquisas`
-- Native module rebuild (after Node upgrade): `npx node-gyp rebuild --release` inside `node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/` — `better-sqlite3` lacks prebuilt binaries for Node 24, so pnpm install will skip the build script and the module will fail to load until rebuilt.
-- Inspect DB (no `sqlite3` CLI available): `node -e "import('better-sqlite3').then(({default:D})=>{const db=new D('data/backup.db');console.log(db.prepare('SELECT COUNT(*) FROM pesquisas').get())})"`
+- Run downloads: `pnpm realizar-download` or `pnpm download-paralelo [N]`
+- Inspect store: `cat data/backup.json | head`
+
+No native modules. Pure JS — works on any Node 20+ without rebuild.
 
 ## Required env
 
@@ -17,17 +19,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-ESM Node.js script project. Single workflow: page through Qualtrics `/surveys` API and persist survey IDs/names to a local SQLite DB for later per-survey backup steps to consume.
+ESM Node.js script project. Workflow: page through Qualtrics `/surveys` API, persist survey IDs/names to a local JSON file, then download per-survey exports and mark each one done.
 
-Three modules, each one responsibility:
+Modules:
 
-- `src/qualtrics.js` — `iterSurveys({token, baseUrl})` async generator. GETs `${baseUrl}/surveys`, yields each `result.elements[i]` tagged with `_page`, follows `result.nextPage` until null. Throws on non-200 `meta.httpStatus` or HTTP errors.
-- `src/db.js` — opens `data/backup.db` (creates dir), enables WAL, ensures table `pesquisas(id TEXT PK, name TEXT NOT NULL, backup_realizado INTEGER DEFAULT 0)`, exports `db` + prepared `INSERT OR IGNORE` stmt.
-- `src/busca-pesquisas.js` — entrypoint. Loads dotenv, validates token, consumes the generator, buffers 500 rows per `db.transaction` batch, logs per-page progress, prints final `vistas` vs `inseridas`.
+- `src/qualtrics.js` — `iterSurveys({token, baseUrl})` async generator + export helpers (`startExport`, `getExportProgress`, `downloadExportFile`). Throws on non-200 `meta.httpStatus` or HTTP errors.
+- `src/store.js` — JSON-file persistence at `data/backup.json`. Exports `loadStore`, `saveStore`, `upsertPesquisa`, `listPending`, `markDone`, `makeSerialSaver`. Atomic writes via tmp+rename.
+- `src/busca-pesquisas.js` — entrypoint. Loads dotenv, validates token, consumes the generator, upserts each survey, saves once at end.
+- `src/realizar-download.js` — sequential download of pending surveys; calls `markDone` after each success.
+- `src/realizar-download-paralelo.js` — concurrent worker pool (default 5); uses `makeSerialSaver` to serialize writes to `data/backup.json` across workers.
+
+Store shape:
+
+```json
+{ "pesquisas": { "<id>": { "id": "...", "name": "...", "backup_realizado": 0 } } }
+```
 
 Key invariants:
-- `INSERT OR IGNORE` keeps `backup_realizado` flag intact across re-runs — never switch to plain INSERT or REPLACE.
-- Boolean stored as INTEGER 0/1 (sqlite convention).
-- `data/` directory is created at runtime by `db.js`; do not commit it (already in `.gitignore`).
-
-The DB schema is designed for future steps to update `backup_realizado=1` once a per-survey export succeeds.
+- `upsertPesquisa` only inserts when `id` is absent — preserves `backup_realizado` across re-runs.
+- `backup_realizado` is `0` or `1`.
+- `data/` directory is created at runtime by `store.js`; do not commit it (already in `.gitignore`).
+- Parallel downloader MUST go through `makeSerialSaver` to avoid concurrent writes corrupting the JSON.

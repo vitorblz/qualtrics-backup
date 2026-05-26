@@ -1,18 +1,20 @@
 # backup_qualtrics
 
-Ferramenta de linha de comando para fazer backup local de todas as pesquisas (surveys) de uma conta Qualtrics. O fluxo é dividido em duas etapas: primeiro inventaria as pesquisas via API e grava num SQLite local; depois exporta cada pesquisa pendente como `.zip` (CSV com labels) em paralelo, marcando no banco as que já foram baixadas para permitir retomadas idempotentes.
+Ferramenta de linha de comando para fazer backup local de todas as pesquisas (surveys) de uma conta Qualtrics. O fluxo é dividido em duas etapas: primeiro inventaria as pesquisas via API e grava num arquivo JSON local; depois exporta cada pesquisa pendente como `.zip` (CSV com labels) em paralelo, marcando no arquivo as que já foram baixadas para permitir retomadas idempotentes.
 
 ## Objetivo
 
-- Manter um catálogo local (`data/backup.db`) com `id` e `name` de cada pesquisa da conta.
+- Manter um catálogo local (`data/backup.json`) com `id` e `name` de cada pesquisa da conta.
 - Baixar as respostas de cada pesquisa para `downloads/<nome>.zip`.
 - Suportar execuções incrementais: rodar de novo só baixa o que ainda não foi baixado.
 
 ## Requisitos
 
-- Node.js 24+
+- Node.js 20+
 - pnpm 10+
 - Token de API Qualtrics com permissão para listar surveys e exportar respostas
+
+Sem módulos nativos, sem build.
 
 ## Instalação
 
@@ -40,7 +42,7 @@ QUALTRICS_BASE_URL=https://yul1.qualtrics.com/API/v3
 pnpm busca-pesquisas
 ```
 
-Pagina o endpoint `/surveys`, insere novos registros em `pesquisas` (id, name, backup_realizado=0). Usa `INSERT OR IGNORE`, então re-execuções não sobrescrevem o status de backup de pesquisas já conhecidas.
+Pagina o endpoint `/surveys` e adiciona novas entradas em `data/backup.json` (`id`, `name`, `backup_realizado=0`). Entradas existentes são preservadas, então re-execuções não sobrescrevem o status de backup de pesquisas já conhecidas.
 
 Saída esperada:
 
@@ -64,16 +66,25 @@ Para cada pesquisa com `backup_realizado = 0`:
 2. Faz polling de `/export-responses/{progressId}` a cada 2s (até 10 tentativas).
 3. Quando o export fica `complete`, baixa o arquivo via `/export-responses/{fileId}/file`.
 4. Salva em `downloads/<nome_sanitizado>.zip` (se já existir, anexa `_<surveyId>` ao nome).
-5. Marca `backup_realizado = 1` no banco.
+5. Marca `backup_realizado = 1` em `data/backup.json`.
 
 Falhas individuais não interrompem o lote — são contadas e logadas no fim.
 
-### 3. Inspecionar o banco
+Variante sequencial disponível: `pnpm realizar-download`.
 
-Não há `sqlite3` CLI instalado por padrão. Use o próprio `better-sqlite3`:
+### 3. Inspecionar o arquivo
+
+JSON puro:
 
 ```bash
-node -e "import('better-sqlite3').then(({default:D})=>{const db=new D('data/backup.db');console.log(db.prepare('SELECT COUNT(*) FROM pesquisas').get())})"
+cat data/backup.json | head
+```
+
+Ou consulte com `jq`:
+
+```bash
+jq '.pesquisas | length' data/backup.json
+jq '[.pesquisas[] | select(.backup_realizado==0)] | length' data/backup.json
 ```
 
 ## Estrutura
@@ -81,29 +92,31 @@ node -e "import('better-sqlite3').then(({default:D})=>{const db=new D('data/back
 ```
 src/
   qualtrics.js                  # cliente HTTP: iterSurveys, startExport, getExportProgress, downloadExportFile
-  db.js                         # abre data/backup.db, cria schema, exporta statements preparados
+  store.js                      # persistência JSON em data/backup.json (escrita atômica)
   busca-pesquisas.js            # entrypoint da etapa 1 (inventário)
-  realizar-download-paralelo.js # entrypoint da etapa 2 (download em paralelo)
+  realizar-download.js          # entrypoint da etapa 2 (sequencial)
+  realizar-download-paralelo.js # entrypoint da etapa 2 (paralelo)
 data/
-  backup.db                     # SQLite (gerado em runtime, gitignored)
+  backup.json                   # store JSON (gerado em runtime, gitignored)
 downloads/
   *.zip                         # exports gerados (gitignored)
 ```
 
-### Schema
+### Formato do store
 
-```sql
-CREATE TABLE pesquisas (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  backup_realizado INTEGER NOT NULL DEFAULT 0
-);
+```json
+{
+  "pesquisas": {
+    "<surveyId>": { "id": "<surveyId>", "name": "...", "backup_realizado": 0 }
+  }
+}
 ```
 
-`backup_realizado` é um boolean armazenado como INTEGER 0/1.
+`backup_realizado` é `0` ou `1`.
 
 ## Notas
 
-- WAL mode habilitado para permitir leituras concorrentes durante a escrita.
+- Escrita atômica (`tmp` + `rename`).
+- Downloader paralelo serializa writes via Promise chain pra evitar corrupção.
 - Nomes de arquivo são sanitizados (caracteres inválidos viram `_`, limitados a 120 chars).
 - Re-rodar `pnpm download-paralelo` é seguro: só processa pendentes.

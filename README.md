@@ -1,18 +1,20 @@
 # Backup Qualtrics
 
-Command-line tool to back up every survey from a Qualtrics account to local disk. The workflow has two stages: first it inventories the surveys via the API and stores them in a local SQLite database; then it exports each pending survey as a `.zip` (CSV with labels) in parallel, marking finished ones in the database so reruns are idempotent.
+Command-line tool to back up every survey from a Qualtrics account to local disk. The workflow has two stages: first it inventories the surveys via the API and stores them in a local JSON file; then it exports each pending survey as a `.zip` (CSV with labels) in parallel, marking finished ones in the file so reruns are idempotent.
 
 ## Goal
 
-- Keep a local catalog (`data/backup.db`) with the `id` and `name` of every survey in the account.
+- Keep a local catalog (`data/backup.json`) with the `id` and `name` of every survey in the account.
 - Download responses for each survey to `downloads/<name>.zip`.
 - Support incremental runs: running again only downloads what hasn't been downloaded yet.
 
 ## Requirements
 
-- Node.js 24+
+- Node.js 20+
 - pnpm 10+
 - Qualtrics API token with permission to list surveys and export responses
+
+No native modules, no build step.
 
 ## Installation
 
@@ -40,7 +42,7 @@ QUALTRICS_BASE_URL=https://yul1.qualtrics.com/API/v3
 pnpm busca-pesquisas
 ```
 
-Paginates the `/surveys` endpoint and inserts new rows into `pesquisas` (id, name, backup_realizado=0). Uses `INSERT OR IGNORE`, so reruns do not overwrite the backup status of surveys already known.
+Paginates the `/surveys` endpoint and adds new entries to `data/backup.json` (`id`, `name`, `backup_realizado=0`). Existing entries are preserved, so reruns do not overwrite the backup status of surveys already known.
 
 Expected output:
 
@@ -64,16 +66,25 @@ For each survey with `backup_realizado = 0`:
 2. Polls `/export-responses/{progressId}` every 2s (up to 10 attempts).
 3. Once the export is `complete`, downloads the file via `/export-responses/{fileId}/file`.
 4. Saves to `downloads/<sanitized_name>.zip` (if it already exists, appends `_<surveyId>` to the name).
-5. Marks `backup_realizado = 1` in the database.
+5. Marks `backup_realizado = 1` in `data/backup.json`.
 
 Individual failures do not halt the batch — they are counted and logged at the end.
 
-### 3. Inspect the database
+Sequential variant available: `pnpm realizar-download`.
 
-No `sqlite3` CLI is installed by default. Use `better-sqlite3` itself:
+### 3. Inspect the store
+
+It's plain JSON:
 
 ```bash
-node -e "import('better-sqlite3').then(({default:D})=>{const db=new D('data/backup.db');console.log(db.prepare('SELECT COUNT(*) FROM pesquisas').get())})"
+cat data/backup.json | head
+```
+
+Or query with `jq`:
+
+```bash
+jq '.pesquisas | length' data/backup.json
+jq '[.pesquisas[] | select(.backup_realizado==0)] | length' data/backup.json
 ```
 
 ## Structure
@@ -81,29 +92,31 @@ node -e "import('better-sqlite3').then(({default:D})=>{const db=new D('data/back
 ```
 src/
   qualtrics.js                  # HTTP client: iterSurveys, startExport, getExportProgress, downloadExportFile
-  db.js                         # opens data/backup.db, creates schema, exports prepared statements
+  store.js                      # JSON persistence at data/backup.json (atomic writes)
   busca-pesquisas.js            # stage 1 entrypoint (inventory)
-  realizar-download-paralelo.js # stage 2 entrypoint (parallel download)
+  realizar-download.js          # stage 2 entrypoint (sequential)
+  realizar-download-paralelo.js # stage 2 entrypoint (parallel)
 data/
-  backup.db                     # SQLite (created at runtime, gitignored)
+  backup.json                   # JSON store (created at runtime, gitignored)
 downloads/
   *.zip                         # generated exports (gitignored)
 ```
 
-### Schema
+### Store shape
 
-```sql
-CREATE TABLE pesquisas (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  backup_realizado INTEGER NOT NULL DEFAULT 0
-);
+```json
+{
+  "pesquisas": {
+    "<surveyId>": { "id": "<surveyId>", "name": "...", "backup_realizado": 0 }
+  }
+}
 ```
 
-`backup_realizado` is a boolean stored as INTEGER 0/1.
+`backup_realizado` is `0` or `1`.
 
 ## Notes
 
-- WAL mode enabled to allow concurrent reads during writes.
+- Writes are atomic (`tmp` file + `rename`).
+- Parallel downloader serializes writes via a Promise chain to avoid corruption.
 - File names are sanitized (invalid characters become `_`, capped at 120 chars).
 - Re-running `pnpm download-paralelo` is safe: only pending surveys are processed.

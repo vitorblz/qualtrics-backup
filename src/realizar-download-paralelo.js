@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { db, listPendingStmt, markDoneStmt } from './db.js';
+import { listPending, loadStore, makeSerialSaver } from './store.js';
 import { downloadExportFile, getExportProgress, startExport } from './qualtrics.js';
 
 const token = process.env.QUALTRICS_API_TOKEN;
@@ -72,15 +72,17 @@ async function baixarPesquisa({ id, name }, workerTag) {
   const buf = Buffer.from(await res.arrayBuffer());
   const path = destPath(name, id);
   writeFileSync(path, buf);
-  markDoneStmt.run(id);
+  await saveDone(state, id);
   return path;
 }
 
+const state = loadStore();
+const saveDone = makeSerialSaver();
 let ok = 0;
 let falhas = 0;
 
 try {
-  const pendentes = listPendingStmt.all();
+  const pendentes = listPending(state);
   console.log(`Pendentes: ${pendentes.length} concorrencia=${concorrencia}`);
 
   let i = 0;
@@ -107,6 +109,7 @@ try {
   await Promise.all(Array.from({ length: workers }, (_, n) => worker(n + 1)));
 
   console.log(`Concluido. ok=${ok} falhas=${falhas} concorrencia=${concorrencia}`);
-} finally {
-  db.close();
+} catch (err) {
+  console.error('Falha:', err.message);
+  process.exitCode = 1;
 }
