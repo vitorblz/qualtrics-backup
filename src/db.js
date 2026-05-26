@@ -19,3 +19,11 @@ db.exec(`
 export const insertPesquisaStmt = db.prepare(
   'INSERT OR IGNORE INTO pesquisas (id, name) VALUES (?, ?)'
 );
+
+export const listPendingStmt = db.prepare(
+  'SELECT id, name FROM pesquisas WHERE backup_realizado = 0'
+);
+
+export const markDoneStmt = db.prepare(
+  'UPDATE pesquisas SET backup_realizado = 1 WHERE id = ?'
+);

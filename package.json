@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/busca-pesquisas.js",
   "scripts": {
-    "busca-pesquisas": "node src/busca-pesquisas.js"
+    "busca-pesquisas": "node src/busca-pesquisas.js",
+    "realizar-download": "node src/realizar-download.js"
   },
   "keywords": [],
   "author": "",
