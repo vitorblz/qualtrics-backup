@@ -6,7 +6,8 @@
   "main": "src/busca-pesquisas.js",
   "scripts": {
     "busca-pesquisas": "node src/busca-pesquisas.js",
-    "realizar-download": "node src/realizar-download.js"
+    "realizar-download": "node src/realizar-download.js",
+    "download-paralelo": "node src/realizar-download-paralelo.js"
   },
   "keywords": [],
   "author": "",

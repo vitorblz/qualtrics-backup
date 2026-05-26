@@ -2,6 +2,6 @@ node_modules/
 .env
 data/
 *.db
-backup/
+backup*
 downloads/
 backup.zip
